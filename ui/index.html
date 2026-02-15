@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AirGap Lab AI</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: #0b1020;
+      color: #e6ebff;
+    }
+    .wrap {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .card {
+      background: #141a2f;
+      border: 1px solid #2b355f;
+      border-radius: 12px;
+      padding: 14px;
+      margin-top: 12px;
+    }
+    textarea, input, button {
+      font: inherit;
+      border-radius: 10px;
+      border: 1px solid #2f3b69;
+      background: #0f1530;
+      color: #e6ebff;
+      padding: 10px;
+    }
+    textarea { width: 100%; min-height: 100px; }
+    input[type="number"] { width: 90px; }
+    button { cursor: pointer; background: #20306b; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .meta { color: #aeb8df; font-size: 0.9rem; }
+    .sources { margin-top: 10px; }
+    .docs { margin-top: 10px; }
+    .doc {
+      border-top: 1px solid #2b355f;
+      padding-top: 10px;
+      margin-top: 10px;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+    }
+    .doc-name { font-size: 0.92rem; color: #cfd7f7; }
+    .doc-meta { color: #aeb8df; font-size: 0.85rem; }
+    .src {
+      border-top: 1px solid #2b355f;
+      padding-top: 10px;
+      margin-top: 10px;
+      white-space: pre-wrap;
+      font-size: 0.92rem;
+      color: #cfd7f7;
+    }
+    #answer { white-space: pre-wrap; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>AirGap Lab AI</h1>
+    <p class="meta">Local-only lab assistant: Ollama + open model + retrieval from your uploaded corpus.</p>
+
+    <div class="card row">
+      <button id="healthBtn">Check Health</button>
+      <button id="ingestBtn">Ingest Corpus</button>
+      <div id="status" class="meta"></div>
+    </div>
+
+    <div class="card">
+      <label for="docs">Upload corpus documents (.md, .txt, .rst, .pdf)</label>
+      <div class="row" style="margin-top:10px; align-items:center;">
+        <input id="docs" type="file" multiple accept=".md,.txt,.rst,.pdf" />
+        <button id="uploadBtn">Upload Documents</button>
+        <button id="refreshDocsBtn">Refresh Documents</button>
+        <button id="deleteAllBtn">Delete All Uploads</button>
+      </div>
+      <p class="meta">After upload, click <b>Ingest Corpus</b> to rebuild the index.</p>
+      <div id="documents" class="docs"></div>
+    </div>
+
+    <div class="card">
+      <label for="question">Question</label>
+      <textarea id="question" placeholder="Ask a domain-specific question..."></textarea>
+      <div class="row" style="margin-top:10px; align-items:center;">
+        <label for="topk">Top K</label>
+        <input id="topk" type="number" min="1" max="12" value="4" />
+        <button id="askBtn">Ask</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="meta" id="modelMeta">Model: unknown</div>
+      <h3>Answer</h3>
+      <div id="answer">No answer yet.</div>
+      <div class="sources" id="sources"></div>
+    </div>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const answerEl = document.getElementById('answer');
+    const modelEl = document.getElementById('modelMeta');
+    const sourcesEl = document.getElementById('sources');
+    const askBtn = document.getElementById('askBtn');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const refreshDocsBtn = document.getElementById('refreshDocsBtn');
+    const deleteAllBtn = document.getElementById('deleteAllBtn');
+    const documentsEl = document.getElementById('documents');
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    function formatBytes(size) {
+      if (size < 1024) return `${size} B`;
+      if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+      return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    async function loadDocuments() {
+      const data = await callApi('/documents', { method: 'GET' });
+      if (!Array.isArray(data.documents) || data.documents.length === 0) {
+        documentsEl.innerHTML = '<div class="meta">No uploaded documents.</div>';
+        return;
+      }
+
+      documentsEl.innerHTML = '<h3>Uploaded Documents</h3>';
+      data.documents.forEach((doc) => {
+        const row = document.createElement('div');
+        row.className = 'doc';
+
+        const left = document.createElement('div');
+        left.innerHTML = `<div class="doc-name">${doc.stored_as}</div><div class="doc-meta">${formatBytes(doc.size_bytes)}</div>`;
+
+        const del = document.createElement('button');
+        del.textContent = 'Delete';
+        del.addEventListener('click', async () => {
+          try {
+            del.disabled = true;
+            setStatus(`Deleting ${doc.stored_as}...`);
+            await callApi(`/documents?stored_as=${encodeURIComponent(doc.stored_as)}`, { method: 'DELETE' });
+            setStatus(`Deleted ${doc.stored_as}. Re-run Ingest Corpus to refresh index.`);
+            await loadDocuments();
+          } catch (err) {
+            setStatus(`Delete error: ${err.message}`);
+          } finally {
+            del.disabled = false;
+          }
+        });
+
+        row.appendChild(left);
+        row.appendChild(del);
+        documentsEl.appendChild(row);
+      });
+    }
+
+    async function callApi(path, options = {}) {
+      const isFormData = options.body instanceof FormData;
+      const headers = {
+        ...(options.headers || {})
+      };
+      if (!isFormData) {
+        headers['Content-Type'] = 'application/json';
+      }
+
+      const resp = await fetch(`/api${path}`, {
+        ...options,
+        headers
+      });
+      const bodyText = await resp.text();
+      let data = {};
+      try {
+        data = bodyText ? JSON.parse(bodyText) : {};
+      } catch (_) {
+        data = {};
+      }
+      if (!resp.ok) {
+        throw new Error(data.detail || bodyText || `${resp.status} ${resp.statusText}` || 'Request failed');
+      }
+      return data;
+    }
+
+    document.getElementById('healthBtn').addEventListener('click', async () => {
+      try {
+        setStatus('Checking health...');
+        const data = await callApi('/health', { method: 'GET' });
+        setStatus(`OK | use_case=${data.use_case_name} | index_ready=${data.index_ready} | model=${data.model}`);
+        modelEl.textContent = `Model: ${data.model}`;
+      } catch (err) {
+        setStatus(`Health error: ${err.message}`);
+      }
+    });
+
+    uploadBtn.addEventListener('click', async () => {
+      const picker = document.getElementById('docs');
+      const files = picker.files;
+      if (!files || files.length === 0) {
+        setStatus('Pick one or more files first.');
+        return;
+      }
+
+      const form = new FormData();
+      Array.from(files).forEach((file) => form.append('files', file));
+
+      try {
+        uploadBtn.disabled = true;
+        setStatus('Uploading documents...');
+        const data = await callApi('/documents/upload', {
+          method: 'POST',
+          body: form
+        });
+        setStatus(`Uploaded ${data.uploaded.length} file(s), rejected ${data.rejected.length}. Run Ingest Corpus next.`);
+        await loadDocuments();
+      } catch (err) {
+        setStatus(`Upload error: ${err.message}`);
+      } finally {
+        uploadBtn.disabled = false;
+      }
+    });
+
+    refreshDocsBtn.addEventListener('click', async () => {
+      try {
+        setStatus('Refreshing uploaded documents...');
+        await loadDocuments();
+        setStatus('Document list refreshed.');
+      } catch (err) {
+        setStatus(`Refresh error: ${err.message}`);
+      }
+    });
+
+    deleteAllBtn.addEventListener('click', async () => {
+      const ok = window.confirm('Delete ALL uploaded documents? This cannot be undone.');
+      if (!ok) {
+        return;
+      }
+
+      try {
+        deleteAllBtn.disabled = true;
+        setStatus('Deleting all uploaded documents...');
+        const data = await callApi('/documents/all', { method: 'DELETE' });
+        setStatus(`Deleted ${data.deleted_count} file(s). Re-run Ingest Corpus to refresh index.`);
+        await loadDocuments();
+      } catch (err) {
+        setStatus(`Delete-all error: ${err.message}`);
+      } finally {
+        deleteAllBtn.disabled = false;
+      }
+    });
+
+    document.getElementById('ingestBtn').addEventListener('click', async () => {
+      try {
+        setStatus('Ingesting corpus...');
+        const data = await callApi('/ingest', { method: 'POST' });
+        setStatus(`Indexed ${data.indexed_chunks} chunks from ${data.indexed_files} files.`);
+      } catch (err) {
+        setStatus(`Ingest error: ${err.message}`);
+      }
+    });
+
+    askBtn.addEventListener('click', async () => {
+      const question = document.getElementById('question').value.trim();
+      const topK = Number(document.getElementById('topk').value || '4');
+      if (!question) {
+        setStatus('Enter a question first.');
+        return;
+      }
+
+      try {
+        askBtn.disabled = true;
+        setStatus('Generating answer...');
+        answerEl.textContent = 'Thinking...';
+        sourcesEl.innerHTML = '';
+
+        const data = await callApi('/ask', {
+          method: 'POST',
+          body: JSON.stringify({ question, top_k: topK })
+        });
+
+        answerEl.textContent = data.answer || '(empty response)';
+        modelEl.textContent = `Model: ${data.model}`;
+
+        if (Array.isArray(data.sources) && data.sources.length > 0) {
+          sourcesEl.innerHTML = '<h3>Sources</h3>';
+          data.sources.forEach((s) => {
+            const div = document.createElement('div');
+            div.className = 'src';
+            div.textContent = `${s.source} | chunk ${s.chunk_id} | score ${s.score.toFixed(4)}\n\n${s.text}`;
+            sourcesEl.appendChild(div);
+          });
+        } else {
+          sourcesEl.innerHTML = '<div class="meta">No retrieved sources.</div>';
+        }
+
+        setStatus('Done.');
+      } catch (err) {
+        answerEl.textContent = 'Request failed.';
+        setStatus(`Ask error: ${err.message}`);
+      } finally {
+        askBtn.disabled = false;
+      }
+    });
+
+    loadDocuments().catch((err) => {
+      setStatus(`Document list error: ${err.message}`);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: airgap-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  rag-api:
+    image: airgap-lab-ai-rag-api:latest
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: airgap-rag-api
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    ports:
+      - "8000:8000"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-auto}
+      OLLAMA_AUTO_PULL: ${OLLAMA_AUTO_PULL:-1}
+      OFFLINE_STRICT: ${OFFLINE_STRICT:-0}
+      VECTOR_STORE_PATH: /workspace/index
+      CORPUS_PATH: /workspace/data/corpus
+      TOP_K: ${TOP_K:-}
+    volumes:
+      - ./data:/workspace/data
+      - ./index:/workspace/index
+
+  web-ui:
+    image: airgap-lab-ai-web-ui:latest
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    container_name: airgap-web-ui
+    restart: unless-stopped
+    depends_on:
+      - rag-api
+    ports:
+      - "8080:80"
+
+volumes:
+  ollama_data:
