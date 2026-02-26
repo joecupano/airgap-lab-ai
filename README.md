@@ -1,6 +1,7 @@
 # AirGap Lab AI
 
-Containerized Retrieval-Augmented Generation platform for domain-specific AI assistants, designed for fully local lab use.
+Containerized Retrieval-Augmented Generation platform for domain-specific AI assistants, designed for fully local lab use. **No external AI services required** - all inference runs locally using Ollama.
+
 Each deployment can be configured for a different use case (prompt behavior, corpus, and model settings) while reusing the same stack.
 
 ## Platform Overview
@@ -8,11 +9,11 @@ Each deployment can be configured for a different use case (prompt behavior, cor
 Services:
 - `ollama`: local model runtime and model storage
 - `rag-api`: FastAPI backend for upload, ingestion, retrieval, and question answering
-- `web-ui`: browser UI for operations and chat
+- `web-ui`: browser UI (nginx) for operations and chat
 
 Persistent storage:
-- Uploaded corpus files: `./data` (mounted to `/workspace/data`)
-- Vector index: `./index`
+- Uploaded corpus files: `./data/corpus` (mounted to `/workspace/data/corpus`)
+- Vector index: `./index` (rebuildable from corpus)
 - Ollama models: Docker volume `ollama_data`
 
 Default endpoints:
@@ -25,26 +26,64 @@ Default endpoints:
 ### 1) Prerequisites
 
 - Linux host with Docker Engine + Docker Compose plugin
-- Recommended: 16–32 GB RAM for better 7B performance
+- Minimum: 8GB RAM (smaller models)
+- Recommended: 16–32 GB RAM for 7B models
+- Optional: NVIDIA GPU with CUDA for accelerated inference
 
 ### 2) Configure environment
 
+Choose a configuration template based on your hardware:
+
 ```bash
-cp .env.example .env
+# For 16GB RAM (CPU only)
+cp .env.cpu-16gb .env
+
+# For 32GB RAM (CPU only)
+cp .env.cpu-32gb .env
+
+# For 64GB RAM (CPU only)
+cp .env.cpu-64gb .env
+
+# For GPU with 6GB VRAM + 64GB RAM
+cp .env.gpu-6gb-64gb .env
+
+# Or start from the documented template
+cp .env.template .env
 ```
 
 Common `.env` settings:
-- `USE_CASE_NAME`: display/use-case identity
-- `ASSISTANT_INSTRUCTIONS`: behavior/guardrails for the assistant
-- `CORPUS_PATH`: corpus root inside container (default `/workspace/data/corpus`)
-- `OLLAMA_MODEL`: `auto` (default) or pinned model tag
-- `OFFLINE_STRICT`: `1` to disallow model pulls at startup
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OLLAMA_MODEL` | Model to use: `auto` or specific tag (e.g., `mistral:7b`) | `auto` |
+| `OLLAMA_AUTO_PULL` | Allow automatic model downloads (`1`=yes, `0`=no) | `1` |
+| `OFFLINE_STRICT` | Block all downloads even if auto-pull enabled (`1`=yes) | `0` |
+| `USE_CASE_NAME` | Identity label in system prompt | `Domain Assistant` |
+| `ASSISTANT_INSTRUCTIONS` | Behavioral guidelines for the AI | Sensible default |
+| `CORPUS_PATH` | Document storage path in container | `/workspace/data/corpus` |
+
+See `.env.template` for full documentation of all options.
 
 ### 3) Start stack
 
 ```bash
 docker compose up --build -d
 ```
+
+Optional scripted setup (same flow as above):
+
+```bash
+# Choose profile and run install flow
+./install.sh cpu-16gb
+
+# Optional GPU-safe startup (requires NVIDIA Container Toolkit)
+./start-stack.sh --gpu
+
+# Non-interactive GPU startup + auto-install toolkit if missing (Debian/Ubuntu)
+./start-stack.sh --gpu --install-toolkit
+```
+
+When run with `--gpu`, `start-stack.sh` checks whether NVIDIA Container Toolkit is configured for Docker and prompts to install it on Debian/Ubuntu if missing. Use `--install-toolkit` to skip the prompt and install automatically.
 
 ### 4) Verify health
 
@@ -71,6 +110,13 @@ curl -X POST http://localhost:8000/ingest
 
 ### 6) Ask questions
 
+Use UI:
+- Open `http://localhost:8080`
+- Enter your question in the chat box
+- Submit to get an answer with retrieved context
+
+Or use API:
+
 ```bash
 curl -X POST http://localhost:8000/ask \
   -H "Content-Type: application/json" \
@@ -81,6 +127,8 @@ curl -X POST http://localhost:8000/ask \
 
 ### Operational workflows
 
+Use the UI (`http://localhost:8080`) for day-to-day upload, ingest, and ask flows. Use API endpoints below for automation/integration.
+
 - **Check status**: `GET /health`
 - **Upload corpus docs**: `POST /documents/upload`
 - **List uploaded docs**: `GET /documents`
@@ -90,14 +138,22 @@ curl -X POST http://localhost:8000/ask \
 
 ### Model management
 
-- Auto mode (`OLLAMA_MODEL=auto`) selects model candidates by detected hardware profile.
-- Pin model explicitly (example):
+**Auto mode** (`OLLAMA_MODEL=auto`) selects models based on detected RAM:
+
+| RAM | Profile | Model Candidates |
+|-----|---------|------------------|
+| ≤8GB | low | qwen2.5:1.5b, qwen2.5:3b |
+| ≤16GB | medium | qwen2.5:3b, llama3.2:3b, mistral:7b |
+| ≤24GB | balanced | mistral:7b, llama3.1:8b, qwen2.5:7b |
+| >24GB | high | mistral:7b, qwen2.5:7b, llama3.1:8b |
+
+**Pin a specific model:**
 
 ```bash
 echo "OLLAMA_MODEL=mistral:7b" >> .env
 ```
 
-- Strict offline operation:
+**Strict offline operation** (for airgapped environments):
 
 ```bash
 echo "OFFLINE_STRICT=1" >> .env
@@ -112,15 +168,22 @@ docker exec -it airgap-ollama ollama pull mistral:7b
 
 ### Runtime tuning
 
-Optional overrides in `.env`:
-- `TOP_K`
-- `MAX_CONTEXT_CHARS`
-- `GEN_NUM_CTX`
-- `GEN_NUM_PREDICT`
-- `GEN_NUM_THREAD`
-- `GEN_TEMPERATURE`
+Performance parameters are auto-tuned based on system RAM. Override in `.env` if needed:
 
-`/health` reports active tuning and environment-derived runtime values.
+| Variable | Description | Auto-tuned |
+|----------|-------------|------------|
+| `TOP_K` | Number of document chunks retrieved per question | 3-5 by RAM |
+| `MAX_CONTEXT_CHARS` | Max characters from retrieved chunks | 8000 |
+| `GEN_NUM_CTX` | Model context window (tokens) | 1536-4096 by RAM |
+| `GEN_NUM_PREDICT` | Max response tokens | 320-640 by RAM |
+| `GEN_NUM_THREAD` | CPU threads for inference | min(cpu_count, 12) |
+| `GEN_TEMPERATURE` | Response randomness (0.0-2.0) | 0.2 |
+
+`/health` endpoint reports active tuning values.
+
+### File upload limits
+
+Maximum upload size: **250MB** per request (configurable in `ui/nginx.conf`).
 
 ### Maintenance commands
 
@@ -141,13 +204,33 @@ docker compose down
 
 ### Repository structure
 
-- `app/src/main.py`: API routes, prompt building, startup checks
-- `app/src/config.py`: environment config + autotune wiring
-- `app/src/ingest.py`: corpus scanning and chunk preparation
-- `app/src/rag.py`: TF-IDF vectorization and retrieval
-- `app/src/ollama_client.py`: model ensure/pull and generation calls
-- `ui/index.html`: single-page operations + chat UI
-- `docker-compose.yml`: service topology and persistence mounts
+```
+├── app/
+│   ├── src/
+│   │   ├── main.py          # API routes, prompt building, startup checks
+│   │   ├── config.py        # Environment config + autotune wiring
+│   │   ├── autotune.py      # RAM-based profile detection
+│   │   ├── ingest.py        # Corpus scanning and chunk preparation
+│   │   ├── rag.py           # TF-IDF vectorization and retrieval
+│   │   └── ollama_client.py # Model ensure/pull and generation calls
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── start.sh
+├── ui/
+│   ├── index.html           # Single-page operations + chat UI
+│   ├── nginx.conf           # Nginx proxy configuration
+│   └── Dockerfile
+├── data/
+│   └── corpus/              # Document storage (persistent)
+│       └── uploads/         # User-uploaded files
+├── index/                   # Vector index files (rebuildable)
+├── docker-compose.yml       # Service topology and mounts
+├── .env.template            # Documented configuration template
+├── .env.cpu-16gb            # Optimized config for 16GB RAM
+├── .env.cpu-32gb            # Optimized config for 32GB RAM
+├── .env.cpu-64gb            # Optimized config for 64GB RAM
+└── .env.gpu-6gb-64gb        # Optimized config for GPU + 64GB RAM
+```
 
 ### Development workflow
 
@@ -161,13 +244,15 @@ docker compose up --build -d
 
 ### API contract summary
 
+Question-answering is available in the UI at `http://localhost:8080` (chat), backed by `POST /ask`.
+
 - `GET /health`
+- `POST /ask`
 - `GET /documents`
 - `POST /documents/upload` (multipart field name: `files`)
 - `DELETE /documents?stored_as=uploads/<name>`
 - `DELETE /documents/all`
 - `POST /ingest`
-- `POST /ask`
 
 `POST /ask` request body example:
 
@@ -183,6 +268,29 @@ docker compose up --build -d
 - Keep corpus persistence under mounted `./data` paths.
 - Re-run ingestion after corpus add/delete operations.
 - If retrieval behavior changes, ensure `rag.py` and ingestion output stay schema-compatible.
+- Index files (`./index/`) are rebuildable - safe to delete and regenerate via "Ingest Corpus".
+
+## Hardware Configuration Examples
+
+### CPU-only systems
+
+| RAM | Config File | Recommended Model | Context Window |
+|-----|-------------|-------------------|----------------|
+| 16GB | `.env.cpu-16gb` | qwen2.5:3b, mistral:7b | 2048 tokens |
+| 32GB | `.env.cpu-32gb` | mistral:7b, llama3.1:8b | 4096 tokens |
+| 64GB | `.env.cpu-64gb` | qwen2.5:14b | 8192 tokens |
+
+### GPU-accelerated systems
+
+| VRAM | RAM | Config File | Recommended Model | Context Window |
+|------|-----|-------------|-------------------|----------------|
+| 6GB | 64GB | `.env.gpu-6gb-64gb` | mixtral:8x7b | 16384 tokens |
+
+**GPU notes:**
+- Requires NVIDIA drivers and CUDA
+- Ollama auto-detects GPU
+- Models larger than VRAM will offload to system RAM (slower but works)
+- Use Q4 quantized models for best VRAM efficiency
 
 ## Troubleshooting
 
@@ -249,3 +357,36 @@ docker compose up --build -d
 ```
 
 Then hard-refresh browser (`Ctrl+Shift+R`).
+
+### 413 Request Entity Too Large
+
+Cause:
+- File upload exceeds nginx size limit.
+
+Fix:
+- Current limit is 250MB (configured in `ui/nginx.conf`).
+- To increase, edit `client_max_body_size` in `ui/nginx.conf` and rebuild:
+
+```bash
+docker compose build web-ui && docker compose up -d web-ui
+```
+
+### Backend container keeps restarting
+
+Cause:
+- Usually a missing model when `OFFLINE_STRICT=1`.
+
+Check logs:
+
+```bash
+docker logs airgap-rag-api --tail 30
+```
+
+Fix:
+- Pull the required model: `docker exec airgap-ollama ollama pull <model>`
+- Or set `OFFLINE_STRICT=0` and `OLLAMA_AUTO_PULL=1` in `.env`
+- Then restart: `docker compose up -d rag-api`
+
+## License
+
+MIT
