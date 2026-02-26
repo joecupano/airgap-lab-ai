@@ -81,9 +81,17 @@ Optional scripted setup (same flow as above):
 
 # Non-interactive GPU startup + auto-install toolkit if missing (Debian/Ubuntu)
 ./start-stack.sh --gpu --install-toolkit
+
+# Force AMD GPU path (auto-detect is default)
+./start-stack.sh --gpu --vendor=amd
+
+# Fail fast if GPU verification does not pass
+./start-stack.sh --gpu --strict-gpu-verify
 ```
 
-When run with `--gpu`, `start-stack.sh` checks whether NVIDIA Container Toolkit is configured for Docker and prompts to install it on Debian/Ubuntu if missing. Use `--install-toolkit` to skip the prompt and install automatically.
+When run with `--gpu`, `start-stack.sh` auto-detects NVIDIA/AMD and checks required container runtime prerequisites. On Debian/Ubuntu, it can prompt to install missing toolkit/runtime dependencies, or install automatically with `--install-toolkit`.
+After startup, it prints a vendor-specific GPU verification status for the `airgap-ollama` container.
+Use `--strict-gpu-verify` to make the script exit non-zero when verification fails.
 
 ### 4) Verify health
 
